@@ -1,0 +1,1594 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+// =========================
+// Types
+// =========================
+
+type Stage = "e-RA" | "LOA" | "PPA" | "COD" | "NA";
+
+type BidRow = {
+  id: string;
+  sNo?: number | null;
+
+  authorityName: string;
+  authorityLevel: string; // e.g., State/Central
+
+  tenderCapacityMW: number | null;
+  category: string;
+  type: string; // BESS / Solar+ESS / FDRE / RTC / etc.
+  connectivity: string; // STU/CTU/ISTS
+
+  rfsNo: string;
+  rfsDate: Date | null;
+  rfsFY: string;
+
+  eRaDate: Date | null;
+  eRaFY: string;
+
+  company: string;
+  groupCompany: string;
+
+  wonCapacityMW: number | null;
+  finalTariff: number | null;
+  initialTariff: number | null;
+
+  statusRaw: string;
+  stage: Stage;
+
+  signedPpaCapMW: number | null;
+  remarks: string;
+
+  bidCapacityMW: number | null;
+  biddingResult: string;
+  anySuccess: boolean | null;
+};
+
+// =========================
+// Helpers
+// =========================
+
+const MONTHS: Record<string, number> = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
+
+function safeTrim(v: unknown): string {
+  return String(v ?? "").replace(/\s+/g, " ").trim();
+}
+
+function toNumber(v: unknown): number | null {
+  const s = safeTrim(v);
+  if (!s) return null;
+  const x = Number(s.replace(/,/g, ""));
+  return Number.isFinite(x) ? x : null;
+}
+
+function parseYesNo(v: unknown): boolean | null {
+  const s = safeTrim(v).toLowerCase();
+  if (!s) return null;
+  if (s === "yes" || s === "y" || s === "true") return true;
+  if (s === "no" || s === "n" || s === "false") return false;
+  return null;
+}
+
+function parseDateFlexible(v: unknown): Date | null {
+  const s = safeTrim(v);
+  if (!s) return null;
+
+  // Try native parse first
+  const native = new Date(s);
+  if (!Number.isNaN(native.getTime())) return native;
+
+  // dd-MMM-yy or dd-MMM-yyyy
+  const m1 = s.match(/^\s*(\d{1,2})\s*[- ]\s*([A-Za-z]{3,9})\s*[- ]\s*(\d{2,4})\s*$/);
+  if (m1) {
+    const day = Number(m1[1]);
+    const monStr = m1[2].toLowerCase();
+    const month = MONTHS[monStr] ?? MONTHS[monStr.slice(0, 3)];
+    let year = Number(m1[3]);
+    if (year < 100) year += year >= 70 ? 1900 : 2000;
+    if (month != null && Number.isFinite(day) && Number.isFinite(year)) {
+      const d = new Date(year, month, day);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+  }
+
+  // M/D/YYYY or D/M/YYYY (we assume M/D if first part <= 12 and second part <= 31)
+  const m2 = s.match(/^\s*(\d{1,2})\s*\/\s*(\d{1,2})\s*\/\s*(\d{2,4})\s*$/);
+  if (m2) {
+    const a = Number(m2[1]);
+    const b = Number(m2[2]);
+    let year = Number(m2[3]);
+    if (year < 100) year += year >= 70 ? 1900 : 2000;
+
+    // Heuristic: treat as M/D when a<=12
+    const month = a <= 12 ? a - 1 : b - 1;
+    const day = a <= 12 ? b : a;
+
+    const d = new Date(year, month, day);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
+}
+
+function fmtDate(d: Date | null): string {
+  if (!d) return "—";
+  try {
+    return d.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    });
+  } catch {
+    return "—";
+  }
+}
+
+function fmtNum(n: number | null, digits = 2): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+function fmtMW(n: number | null): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return `${n.toLocaleString(undefined, { maximumFractionDigits: 2 })} MW`;
+}
+
+function deriveStage(statusRaw: string): Stage {
+  const s = safeTrim(statusRaw).toLowerCase();
+  if (!s || s === "not applicable") return "NA";
+  if (s.includes("cod")) return "COD";
+  if (s.includes("ppa")) return "PPA";
+  if (s.includes("loa")) return "LOA";
+  if (s.includes("e-ra") || s.includes("era") || s.includes("e ra")) return "e-RA";
+  return "NA";
+}
+
+function uniq<T>(arr: T[]): T[] {
+  return Array.from(new Set(arr));
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function normalizeKey(s: string) {
+  return safeTrim(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// A small, dependency-free CSV/TSV parser (handles quotes reasonably well).
+function parseDelimited(text: string): { headers: string[]; rows: string[][] } {
+  const raw = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return { headers: [], rows: [] };
+
+  const delimiter = (() => {
+    const first = lines[0];
+    const commas = (first.match(/,/g) || []).length;
+    const tabs = (first.match(/\t/g) || []).length;
+    return tabs > commas ? "\t" : ",";
+  })();
+
+  const parseLine = (line: string): string[] => {
+    const out: string[] = [];
+    let cur = "";
+    let inQ = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQ = !inQ;
+        }
+      } else if (ch === delimiter && !inQ) {
+        out.push(cur);
+        cur = "";
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur);
+    return out.map((x) => x.trim());
+  };
+
+  const headers = parseLine(lines[0]);
+  const rows = lines.slice(1).map(parseLine);
+  return { headers, rows };
+}
+
+function rowsToBidRows(headers: string[], rows: string[][]): BidRow[] {
+  // Your sheet has two columns called "Bidding Authority".
+  // We map: 2nd column => authorityName, 3rd column => authorityLevel.
+
+  const idx: Record<string, number> = {};
+  headers.forEach((h, i) => {
+    const k = normalizeKey(h);
+    // Keep first occurrence; special-case duplicate headers by appending index.
+    if (idx[k] == null) idx[k] = i;
+    else idx[`${k}__${i}`] = i;
+  });
+
+  const get = (r: string[], key: string, fallbackIndex?: number): string => {
+    const i = idx[normalizeKey(key)];
+    if (i != null) return safeTrim(r[i]);
+    if (fallbackIndex != null && r[fallbackIndex] != null) return safeTrim(r[fallbackIndex]);
+    return "";
+  };
+
+  // Find the two "bidding authority" columns by raw header match
+  const baCols = headers
+    .map((h, i) => ({ h, i }))
+    .filter((x) => normalizeKey(x.h) === "bidding authority")
+    .map((x) => x.i);
+
+  const baNameIdx = baCols[0];
+  const baLevelIdx = baCols[1];
+
+  return rows
+    .map((r, ridx) => {
+      const authorityName = safeTrim(r[baNameIdx ?? -1] ?? "");
+      const authorityLevel = safeTrim(r[baLevelIdx ?? -1] ?? "");
+
+      const statusRaw = get(r, "Status (e-RA/LOA/PPA/COD)");
+      const stage = deriveStage(statusRaw);
+
+      const row: BidRow = {
+        id: `${authorityName || "NA"}__${get(r, "RFS No.") || "NA"}__${get(r, "Company") || "NA"}__${ridx}`,
+        sNo: toNumber(get(r, "S.No.")) ?? null,
+
+        authorityName: authorityName || get(r, "Bidding Authority") || "—",
+        authorityLevel: authorityLevel || "—",
+
+        tenderCapacityMW: toNumber(get(r, "Tender Capacity")),
+        category: get(r, "Category") || "—",
+        type: get(r, "Type") || "—",
+        connectivity: get(r, "Connectivity") || "—",
+
+        rfsNo: get(r, "RFS No.") || "—",
+        rfsDate: parseDateFlexible(get(r, "RFS Date")),
+        rfsFY: get(r, "RFS Financial Year") || "—",
+
+        eRaDate: parseDateFlexible(get(r, "eRA")),
+        eRaFY: get(r, "Financial Year") || "—",
+
+        company: get(r, "Company") || "—",
+        groupCompany: get(r, "Group Company") || get(r, "Company") || "—",
+
+        wonCapacityMW: toNumber(get(r, "Won Capacity")),
+        finalTariff: toNumber(get(r, "Final Tariff")),
+        initialTariff: toNumber(get(r, "Initial Tariff")),
+
+        statusRaw: statusRaw || "—",
+        stage,
+
+        signedPpaCapMW: toNumber(get(r, "Signed PPA Cap. (MW)")),
+        remarks: get(r, "Remarks"),
+
+        bidCapacityMW: toNumber(get(r, "Bid Capacity")),
+        biddingResult: get(r, "Bidding Result") || "—",
+        anySuccess: parseYesNo(get(r, "Any Success")),
+      };
+
+      // Skip empty rows
+      if (
+        !safeTrim(row.authorityName) &&
+        !safeTrim(row.rfsNo) &&
+        !safeTrim(row.company)
+      ) {
+        return null;
+      }
+
+      return row;
+    })
+    .filter(Boolean) as BidRow[];
+}
+
+function weightedAverage(values: Array<{ v: number | null; w: number | null }>): number | null {
+  let sum = 0;
+  let wsum = 0;
+  for (const { v, w } of values) {
+    if (v == null || w == null) continue;
+    if (!Number.isFinite(v) || !Number.isFinite(w)) continue;
+    if (w <= 0) continue;
+    sum += v * w;
+    wsum += w;
+  }
+  return wsum > 0 ? sum / wsum : null;
+}
+
+function groupBy<T>(arr: T[], keyFn: (x: T) => string): Record<string, T[]> {
+  return arr.reduce<Record<string, T[]>>((acc, item) => {
+    const k = keyFn(item) || "—";
+    (acc[k] = acc[k] || []).push(item);
+    return acc;
+  }, {});
+}
+
+function monthKey(d: Date | null): string {
+  if (!d) return "Unknown";
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  return `${y}-${String(m).padStart(2, "0")}`;
+}
+
+// =========================
+// Demo Data (small subset)
+// =========================
+
+const SAMPLE: BidRow[] = [
+  {
+    id: "APTransco__APTRANSCO-1 GW-2GWh__Ecoren__1",
+    sNo: 2,
+    authorityName: "APTransco",
+    authorityLevel: "State",
+    tenderCapacityMW: 1000,
+    category: "ESS/BESS",
+    type: "BESS",
+    connectivity: "STU",
+    rfsNo: "APTRANSCO-1 GW-2GWh-BESS+VGF-18LMWh",
+    rfsDate: parseDateFlexible("25-Aug-25"),
+    rfsFY: "FY 2026",
+    eRaDate: parseDateFlexible("29-Nov-25"),
+    eRaFY: "FY 2026",
+    company: "Ecoren Energy",
+    groupCompany: "Ecoren Energy",
+    wonCapacityMW: 275,
+    finalTariff: 1.5,
+    initialTariff: null,
+    statusRaw: "e-RA",
+    stage: "e-RA",
+    signedPpaCapMW: null,
+    remarks: "",
+    bidCapacityMW: 50,
+    biddingResult: "Partial Capacity Won",
+    anySuccess: true,
+  },
+  {
+    id: "RUVNL__RUVNL - BESS - 500__Patanjali__8",
+    sNo: 8,
+    authorityName: "RUVNL",
+    authorityLevel: "State",
+    tenderCapacityMW: 500,
+    category: "ESS/BESS",
+    type: "BESS",
+    connectivity: "STU",
+    rfsNo: "RUVNL - BESS - 500 MW / 2000 MWh",
+    rfsDate: parseDateFlexible("8-Aug-25"),
+    rfsFY: "FY 2026",
+    eRaDate: parseDateFlexible("24-Nov-25"),
+    eRaFY: "FY 2026",
+    company: "Patanjali Ayurved Ltd.",
+    groupCompany: "Patanjali",
+    wonCapacityMW: 250,
+    finalTariff: 2.85,
+    initialTariff: 2.85,
+    statusRaw: "e-RA",
+    stage: "e-RA",
+    signedPpaCapMW: null,
+    remarks: "",
+    bidCapacityMW: 150,
+    biddingResult: "Partial Capacity Won",
+    anySuccess: true,
+  },
+  {
+    id: "REMCL__REMCL 1 GW RTC__ReNew__18",
+    sNo: 18,
+    authorityName: "REMCL",
+    authorityLevel: "Central",
+    tenderCapacityMW: 1000,
+    category: "RTC/FDRE",
+    type: "RTC",
+    connectivity: "ISTS",
+    rfsNo: "REMCL 1 GW RTC",
+    rfsDate: parseDateFlexible("24-Jul-25"),
+    rfsFY: "FY 2026",
+    eRaDate: parseDateFlexible("21-Nov-25"),
+    eRaFY: "FY 2026",
+    company: "ReNew",
+    groupCompany: "ReNew",
+    wonCapacityMW: 200,
+    finalTariff: 4.35,
+    initialTariff: 5.05,
+    statusRaw: "e-RA",
+    stage: "e-RA",
+    signedPpaCapMW: null,
+    remarks: "",
+    bidCapacityMW: 100,
+    biddingResult: "Partial Capacity Won",
+    anySuccess: true,
+  },
+  {
+    id: "SECI__SECI-2000 MW-Solar+ESS__Welspun__42",
+    sNo: 42,
+    authorityName: "SECI",
+    authorityLevel: "Central",
+    tenderCapacityMW: 2000,
+    category: "RTC/FDRE",
+    type: "Solar + ESS",
+    connectivity: "CTU",
+    rfsNo: "SECI-2000 MW-Solar+ESS-ISTS-20",
+    rfsDate: parseDateFlexible("12-Jun-25"),
+    rfsFY: "FY 2026",
+    eRaDate: parseDateFlexible("15-Oct-25"),
+    eRaFY: "FY 2026",
+    company: "Welspun",
+    groupCompany: "Welspun",
+    wonCapacityMW: 200,
+    finalTariff: 2.86,
+    initialTariff: 2.86,
+    statusRaw: "e-RA",
+    stage: "e-RA",
+    signedPpaCapMW: null,
+    remarks: "",
+    bidCapacityMW: 120,
+    biddingResult: "Partial Capacity Won",
+    anySuccess: true,
+  },
+  {
+    id: "SJVN__FDRE-4__Reliance NU Energies__68",
+    sNo: 68,
+    authorityName: "SJVN",
+    authorityLevel: "Central",
+    tenderCapacityMW: 1500,
+    category: "RTC/FDRE",
+    type: "FDRE",
+    connectivity: "CTU",
+    rfsNo: "SJVN - 1.5 GW/ 6 GWh - FDRE-4 (Assured Peak only)",
+    rfsDate: parseDateFlexible("6-Dec-24"),
+    rfsFY: "FY 2025",
+    eRaDate: parseDateFlexible("9-Oct-25"),
+    eRaFY: "FY 2026",
+    company: "Reliance NU Energies",
+    groupCompany: "Reliance",
+    wonCapacityMW: 750,
+    finalTariff: 6.74,
+    initialTariff: 8.49,
+    statusRaw: "e-RA",
+    stage: "e-RA",
+    signedPpaCapMW: null,
+    remarks: "",
+    bidCapacityMW: 225,
+    biddingResult: "Partial Capacity Won",
+    anySuccess: true,
+  },
+];
+
+// =========================
+// UI pieces
+// =========================
+
+function Pill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-sm font-medium">{value}</div>
+    </div>
+  );
+}
+
+function KpiCard({
+  title,
+  value,
+  sub,
+}: {
+  title: string;
+  value: string;
+  sub?: string;
+}) {
+  return (
+    <Card className="rounded-2xl">
+      <CardHeader className="pb-2">
+        <CardDescription>{title}</CardDescription>
+        <CardTitle className="text-2xl">{value}</CardTitle>
+      </CardHeader>
+      {sub ? (
+        <CardContent className="pt-0">
+          <div className="text-xs text-muted-foreground">{sub}</div>
+        </CardContent>
+      ) : null}
+    </Card>
+  );
+}
+
+function MultiSelectFilter({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [q, setQ] = useState("");
+  const filtered = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    if (!qq) return options;
+    return options.filter((o) => o.toLowerCase().includes(qq));
+  }, [options, q]);
+
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const shownCount = selected.length;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" className="justify-between rounded-xl">
+          <span className="truncate">{label}</span>
+          <span className="ml-2 flex items-center gap-2">
+            {shownCount > 0 ? (
+              <Badge variant="secondary" className="rounded-lg">
+                {shownCount}
+              </Badge>
+            ) : (
+              <span className="text-muted-foreground">All</span>
+            )}
+          </span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 rounded-2xl" align="start">
+        <div className="space-y-3">
+          <div className="text-sm font-medium">{label}</div>
+          <Input
+            placeholder="Search…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="rounded-xl"
+          />
+          <div className="max-h-64 space-y-2 overflow-auto pr-1">
+            {filtered.map((opt) => {
+              const checked = selectedSet.has(opt);
+              return (
+                <label
+                  key={opt}
+                  className="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-1 hover:bg-muted"
+                >
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={(v) => {
+                      const yes = Boolean(v);
+                      if (yes) onChange(uniq([...selected, opt]));
+                      else onChange(selected.filter((x) => x !== opt));
+                    }}
+                  />
+                  <span className="text-sm">{opt}</span>
+                </label>
+              );
+            })}
+            {filtered.length === 0 ? (
+              <div className="text-xs text-muted-foreground">No matches.</div>
+            ) : null}
+          </div>
+          <Separator />
+          <div className="flex items-center justify-between">
+            <Button
+              variant="ghost"
+              className="rounded-xl"
+              onClick={() => onChange([])}
+            >
+              Clear
+            </Button>
+            <div className="text-xs text-muted-foreground">
+              {selected.length} selected
+            </div>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// =========================
+// Main Component
+// =========================
+
+export default function CompetitorBiddingDashboard() {
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const [rawText, setRawText] = useState<string>("");
+  const [data, setData] = useState<BidRow[]>(SAMPLE);
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  // Filters
+  const [authorityNames, setAuthorityNames] = useState<string[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [types, setTypes] = useState<string[]>([]);
+  const [connectivities, setConnectivities] = useState<string[]>([]);
+  const [fy, setFy] = useState<string[]>([]);
+  const [stages, setStages] = useState<string[]>([]);
+  const [companies, setCompanies] = useState<string[]>([]);
+  const [groupCompanies, setGroupCompanies] = useState<string[]>([]);
+  const [search, setSearch] = useState<string>("");
+
+  // Competitor focus
+  const [focusCompany, setFocusCompany] = useState<string>("");
+  const [focusMode, setFocusMode] = useState<"Company" | "Group">("Group");
+
+  // Table controls
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(15);
+  const [sortKey, setSortKey] = useState<
+    keyof Pick<BidRow, "eRaDate" | "finalTariff" | "wonCapacityMW" | "bidCapacityMW" | "company" | "authorityName" | "category" | "type" | "stage">
+  >("eRaDate");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  useEffect(() => {
+    // Reset pagination when filters change
+    setPage(1);
+  }, [
+    authorityNames,
+    categories,
+    types,
+    connectivities,
+    fy,
+    stages,
+    companies,
+    groupCompanies,
+    search,
+    data,
+  ]);
+
+  const filterOptions = useMemo(() => {
+    const opts = {
+      authorityName: uniq(data.map((d) => d.authorityName).filter(Boolean)).sort(),
+      category: uniq(data.map((d) => d.category).filter(Boolean)).sort(),
+      type: uniq(data.map((d) => d.type).filter(Boolean)).sort(),
+      connectivity: uniq(data.map((d) => d.connectivity).filter(Boolean)).sort(),
+      fy: uniq(data.map((d) => d.eRaFY || d.rfsFY).filter(Boolean)).sort(),
+      stage: uniq(data.map((d) => d.stage).filter(Boolean)).sort(),
+      company: uniq(data.map((d) => d.company).filter(Boolean)).sort(),
+      groupCompany: uniq(data.map((d) => d.groupCompany).filter(Boolean)).sort(),
+    };
+
+    // Choose a default focus company
+    if (!focusCompany && opts.groupCompany.length > 0) {
+      setFocusCompany(opts.groupCompany[0]);
+    }
+
+    return opts;
+  }, [data]);
+
+  const filtered = useMemo(() => {
+    const s = search.trim().toLowerCase();
+
+    return data.filter((d) => {
+      if (authorityNames.length && !authorityNames.includes(d.authorityName)) return false;
+      if (categories.length && !categories.includes(d.category)) return false;
+      if (types.length && !types.includes(d.type)) return false;
+      if (connectivities.length && !connectivities.includes(d.connectivity)) return false;
+      if (fy.length) {
+        const key = d.eRaFY || d.rfsFY;
+        if (!fy.includes(key)) return false;
+      }
+      if (stages.length && !stages.includes(d.stage)) return false;
+      if (companies.length && !companies.includes(d.company)) return false;
+      if (groupCompanies.length && !groupCompanies.includes(d.groupCompany)) return false;
+
+      if (s) {
+        const hay = [
+          d.authorityName,
+          d.authorityLevel,
+          d.category,
+          d.type,
+          d.connectivity,
+          d.rfsNo,
+          d.company,
+          d.groupCompany,
+          d.statusRaw,
+          d.biddingResult,
+          d.remarks,
+        ]
+          .join(" | ")
+          .toLowerCase();
+        if (!hay.includes(s)) return false;
+      }
+
+      return true;
+    });
+  }, [
+    data,
+    authorityNames,
+    categories,
+    types,
+    connectivities,
+    fy,
+    stages,
+    companies,
+    groupCompanies,
+    search,
+  ]);
+
+  const kpis = useMemo(() => {
+    const participation = filtered.length;
+    const totalBid = filtered.reduce((a, d) => a + (d.bidCapacityMW ?? 0), 0);
+    const totalWon = filtered.reduce((a, d) => a + (d.wonCapacityMW ?? 0), 0);
+    const successes = filtered.filter((d) => d.anySuccess === true).length;
+
+    // Unique tenders (by RFS No.) for counts & tender capacity totals
+    const byTender = groupBy(filtered, (d) => d.rfsNo);
+    const tenderCount = Object.keys(byTender).filter((k) => k && k !== "—").length;
+    const tenderCap = Object.values(byTender).reduce((a, rows) => {
+      // Use first non-null tender capacity per tender
+      const first = rows.find((r) => r.tenderCapacityMW != null)?.tenderCapacityMW ?? 0;
+      return a + first;
+    }, 0);
+
+    const wAvgTariff = weightedAverage(
+      filtered.map((d) => ({ v: d.finalTariff, w: d.wonCapacityMW }))
+    );
+
+    const winRate = participation > 0 ? (successes / participation) * 100 : 0;
+
+    return {
+      participation,
+      tenderCount,
+      tenderCap,
+      totalBid,
+      totalWon,
+      successes,
+      winRate,
+      wAvgTariff,
+    };
+  }, [filtered]);
+
+  const topCompaniesByWon = useMemo(() => {
+    const by = groupBy(filtered, (d) => d.groupCompany || d.company);
+    const items = Object.entries(by)
+      .map(([name, rows]) => ({
+        name,
+        won: rows.reduce((a, r) => a + (r.wonCapacityMW ?? 0), 0),
+        bid: rows.reduce((a, r) => a + (r.bidCapacityMW ?? 0), 0),
+        avgTariff: weightedAverage(rows.map((r) => ({ v: r.finalTariff, w: r.wonCapacityMW }))),
+      }))
+      .filter((x) => x.won > 0)
+      .sort((a, b) => b.won - a.won)
+      .slice(0, 10);
+    return items;
+  }, [filtered]);
+
+  const statusPie = useMemo(() => {
+    const by = groupBy(filtered, (d) => d.stage);
+    return Object.entries(by)
+      .map(([stage, rows]) => ({ stage, count: rows.length }))
+      .sort((a, b) => b.count - a.count);
+  }, [filtered]);
+
+  const wAvgTariffByMonth = useMemo(() => {
+    const by = groupBy(filtered, (d) => monthKey(d.eRaDate));
+    const keys = Object.keys(by).sort();
+    return keys.map((k) => {
+      const rows = by[k];
+      const wAvg = weightedAverage(rows.map((r) => ({ v: r.finalTariff, w: r.wonCapacityMW })));
+      const won = rows.reduce((a, r) => a + (r.wonCapacityMW ?? 0), 0);
+      return { month: k, wAvgTariff: wAvg ?? 0, won };
+    });
+  }, [filtered]);
+
+  const wonByCategory = useMemo(() => {
+    const by = groupBy(filtered, (d) => d.category);
+    return Object.entries(by)
+      .map(([category, rows]) => ({
+        category,
+        won: rows.reduce((a, r) => a + (r.wonCapacityMW ?? 0), 0),
+        bid: rows.reduce((a, r) => a + (r.bidCapacityMW ?? 0), 0),
+      }))
+      .sort((a, b) => b.won - a.won);
+  }, [filtered]);
+
+  const focusRows = useMemo(() => {
+    const key = focusCompany;
+    if (!key) return [];
+    return filtered.filter((r) => (focusMode === "Group" ? r.groupCompany : r.company) === key);
+  }, [filtered, focusCompany, focusMode]);
+
+  const focusKpis = useMemo(() => {
+    const participation = focusRows.length;
+    const bid = focusRows.reduce((a, r) => a + (r.bidCapacityMW ?? 0), 0);
+    const won = focusRows.reduce((a, r) => a + (r.wonCapacityMW ?? 0), 0);
+    const successes = focusRows.filter((r) => r.anySuccess === true).length;
+    const winRate = participation > 0 ? (successes / participation) * 100 : 0;
+    const wAvg = weightedAverage(focusRows.map((r) => ({ v: r.finalTariff, w: r.wonCapacityMW })));
+
+    // Top 3 tender participation (by won or bid)
+    const byTender = groupBy(focusRows, (r) => r.rfsNo);
+    const topTenders = Object.entries(byTender)
+      .map(([rfsNo, rows]) => ({
+        rfsNo,
+        authority: rows[0]?.authorityName ?? "—",
+        won: rows.reduce((a, x) => a + (x.wonCapacityMW ?? 0), 0),
+        bid: rows.reduce((a, x) => a + (x.bidCapacityMW ?? 0), 0),
+        stage: rows[0]?.stage ?? "NA",
+      }))
+      .sort((a, b) => (b.won || b.bid) - (a.won || a.bid))
+      .slice(0, 3);
+
+    return { participation, bid, won, successes, winRate, wAvg, topTenders };
+  }, [focusRows]);
+
+  const sortedPaged = useMemo(() => {
+    const getSortVal = (r: BidRow) => {
+      const v = r[sortKey];
+      if (v instanceof Date) return v.getTime();
+      if (typeof v === "number") return v;
+      if (typeof v === "string") return v.toLowerCase();
+      return v == null ? -Infinity : String(v);
+    };
+
+    const arr = [...filtered].sort((a, b) => {
+      const av = getSortVal(a);
+      const bv = getSortVal(b);
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+
+    const total = arr.length;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const cur = clamp(page, 1, pages);
+    const start = (cur - 1) * pageSize;
+    const end = start + pageSize;
+
+    return {
+      rows: arr.slice(start, end),
+      total,
+      pages,
+      page: cur,
+    };
+  }, [filtered, sortKey, sortDir, page, pageSize]);
+
+  function loadFromText(text: string) {
+    try {
+      setParseError(null);
+      const { headers, rows } = parseDelimited(text);
+      if (headers.length < 5) {
+        setParseError("Could not detect a valid header row. Paste CSV/TSV with headers.");
+        return;
+      }
+      const parsed = rowsToBidRows(headers, rows);
+      if (parsed.length === 0) {
+        setParseError("Parsed 0 rows. Check delimiter and header names.");
+        return;
+      }
+      setData(parsed);
+    } catch (e: any) {
+      setParseError(e?.message || "Parse failed.");
+    }
+  }
+
+  function onUploadFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const txt = String(reader.result ?? "");
+      setRawText(txt);
+      loadFromText(txt);
+    };
+    reader.readAsText(file);
+  }
+
+  function SortableTh({
+    label,
+    k,
+  }: {
+    label: string;
+    k: typeof sortKey;
+  }) {
+    const active = sortKey === k;
+    return (
+      <TableHead
+        className="cursor-pointer select-none"
+        onClick={() => {
+          if (sortKey === k) setSortDir(sortDir === "asc" ? "desc" : "asc");
+          else {
+            setSortKey(k);
+            setSortDir("desc");
+          }
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <span>{label}</span>
+          {active ? (
+            <Badge variant="secondary" className="rounded-lg">
+              {sortDir}
+            </Badge>
+          ) : null}
+        </div>
+      </TableHead>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-background p-4 md:p-6">
+      <div className="mx-auto max-w-7xl space-y-6">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+          <div>
+            <div className="text-sm text-muted-foreground">Competitor Intelligence</div>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Bidding Action Dashboard
+            </h1>
+            <div className="mt-1 text-sm text-muted-foreground">
+              Upload/paste your bidding tracker and explore wins, tariffs, participation and stage progression.
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              className="rounded-xl"
+              onClick={() => {
+                setData(SAMPLE);
+                setParseError(null);
+                setRawText("");
+              }}
+            >
+              Use sample
+            </Button>
+            <Button
+              className="rounded-xl"
+              onClick={() => fileRef.current?.click()}
+            >
+              Upload CSV/TSV
+            </Button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,.tsv,.txt"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onUploadFile(f);
+                e.currentTarget.value = "";
+              }}
+            />
+          </div>
+        </div>
+
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle className="text-base">Data ingestion</CardTitle>
+            <CardDescription>
+              Tip: export your sheet as CSV. This parser also works with TSV (tab-separated).
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Tabs defaultValue="paste">
+              <TabsList className="rounded-xl">
+                <TabsTrigger value="paste" className="rounded-xl">
+                  Paste
+                </TabsTrigger>
+                <TabsTrigger value="schema" className="rounded-xl">
+                  Expected columns
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="paste" className="mt-4 space-y-3">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div className="text-sm text-muted-foreground">
+                    Paste CSV/TSV below and click “Load”.
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() => {
+                        navigator.clipboard
+                          .readText()
+                          .then((t) => setRawText(t))
+                          .catch(() => {});
+                      }}
+                    >
+                      Paste from clipboard
+                    </Button>
+                    <Button
+                      className="rounded-xl"
+                      onClick={() => loadFromText(rawText)}
+                    >
+                      Load
+                    </Button>
+                  </div>
+                </div>
+                <textarea
+                  value={rawText}
+                  onChange={(e) => setRawText(e.target.value)}
+                  className="min-h-[160px] w-full rounded-2xl border bg-background p-3 text-sm outline-none focus:ring-2"
+                  placeholder="Paste CSV/TSV here (with header row)…"
+                />
+                {parseError ? (
+                  <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+                    {parseError}
+                  </div>
+                ) : null}
+                <div className="text-xs text-muted-foreground">
+                  Loaded rows: <span className="font-medium">{data.length}</span>
+                </div>
+              </TabsContent>
+              <TabsContent value="schema" className="mt-4">
+                <div className="grid gap-2 md:grid-cols-2">
+                  {[
+                    "S.No.",
+                    "Bidding Authority (name)",
+                    "Bidding Authority (level: State/Central)",
+                    "Tender Capacity",
+                    "Category",
+                    "Type",
+                    "Connectivity",
+                    "RFS No.",
+                    "RFS Date",
+                    "RFS Financial Year",
+                    "eRA (auction date)",
+                    "Financial Year",
+                    "Company",
+                    "Group Company",
+                    "Won Capacity",
+                    "Final Tariff",
+                    "Initial Tariff",
+                    "Status (e-RA/LOA/PPA/COD)",
+                    "Signed PPA Cap. (MW)",
+                    "Remarks",
+                    "Bid Capacity",
+                    "Bidding Result",
+                    "Any Success",
+                  ].map((x) => (
+                    <Pill key={x} label="Column" value={x} />
+                  ))}
+                </div>
+                <div className="mt-3 text-xs text-muted-foreground">
+                  Duplicate header note: if your file has two columns both named “Bidding Authority”, the dashboard will treat the first as name and the second as level.
+                </div>
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+
+        {/* Filters */}
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle className="text-base">Filters</CardTitle>
+            <CardDescription>
+              Build views like: “SECI + RTC/FDRE + LOA/PPA”, or “BESS only (STU)”, or “Only winners”.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-2 md:grid-cols-4">
+              <MultiSelectFilter
+                label="Authority"
+                options={filterOptions.authorityName}
+                selected={authorityNames}
+                onChange={setAuthorityNames}
+              />
+              <MultiSelectFilter
+                label="Category"
+                options={filterOptions.category}
+                selected={categories}
+                onChange={setCategories}
+              />
+              <MultiSelectFilter
+                label="Type"
+                options={filterOptions.type}
+                selected={types}
+                onChange={setTypes}
+              />
+              <MultiSelectFilter
+                label="Connectivity"
+                options={filterOptions.connectivity}
+                selected={connectivities}
+                onChange={setConnectivities}
+              />
+              <MultiSelectFilter
+                label="FY"
+                options={filterOptions.fy}
+                selected={fy}
+                onChange={setFy}
+              />
+              <MultiSelectFilter
+                label="Stage"
+                options={filterOptions.stage}
+                selected={stages}
+                onChange={setStages}
+              />
+              <MultiSelectFilter
+                label="Company"
+                options={filterOptions.company}
+                selected={companies}
+                onChange={setCompanies}
+              />
+              <MultiSelectFilter
+                label="Group Company"
+                options={filterOptions.groupCompany}
+                selected={groupCompanies}
+                onChange={setGroupCompanies}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="flex w-full gap-2 md:max-w-xl">
+                <Input
+                  className="rounded-xl"
+                  placeholder="Search across authority / tender / company / remarks…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+                <Button
+                  variant="outline"
+                  className="rounded-xl"
+                  onClick={() => {
+                    setAuthorityNames([]);
+                    setCategories([]);
+                    setTypes([]);
+                    setConnectivities([]);
+                    setFy([]);
+                    setStages([]);
+                    setCompanies([]);
+                    setGroupCompanies([]);
+                    setSearch("");
+                  }}
+                >
+                  Reset
+                </Button>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Showing <span className="font-medium">{filtered.length}</span> rows (of {data.length})
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* KPIs */}
+        <div className="grid gap-3 md:grid-cols-4">
+          <KpiCard
+            title="Unique tenders"
+            value={kpis.tenderCount.toLocaleString()}
+            sub={`Tendered capacity (approx): ${kpis.tenderCap.toLocaleString()} MW`}
+          />
+          <KpiCard
+            title="Participation rows"
+            value={kpis.participation.toLocaleString()}
+            sub={`Success rows: ${kpis.successes.toLocaleString()} (${fmtNum(kpis.winRate, 1)}%)`}
+          />
+          <KpiCard
+            title="Total bid capacity"
+            value={kpis.totalBid.toLocaleString() + " MW"}
+            sub="Sum of Bid Capacity across visible rows"
+          />
+          <KpiCard
+            title="Total won capacity"
+            value={kpis.totalWon.toLocaleString() + " MW"}
+            sub={`Weighted avg final tariff (won-weighted): ${fmtNum(kpis.wAvgTariff, 3)}`}
+          />
+        </div>
+
+        {/* Charts */}
+        <div className="grid gap-3 lg:grid-cols-2">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle className="text-base">Top winners (by won capacity)</CardTitle>
+              <CardDescription>Grouped by Group Company (falls back to Company).</CardDescription>
+            </CardHeader>
+            <CardContent className="h-[320px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topCompaniesByWon} margin={{ top: 10, right: 10, left: 0, bottom: 70 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={70} />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="won" name="Won (MW)" />
+                  <Bar dataKey="bid" name="Bid (MW)" />
+                </BarChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle className="text-base">Tariff trend (won-weighted)</CardTitle>
+              <CardDescription>Monthly weighted average final tariff using eRA date.</CardDescription>
+            </CardHeader>
+            <CardContent className="h-[320px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={wAvgTariffByMonth} margin={{ top: 10, right: 10, left: 0, bottom: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="month" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Line type="monotone" dataKey="wAvgTariff" name="Weighted Avg Tariff" dot={false} />
+                  <Line type="monotone" dataKey="won" name="Won (MW)" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle className="text-base">Won capacity by category</CardTitle>
+              <CardDescription>Helps you compare where competitors are winning.</CardDescription>
+            </CardHeader>
+            <CardContent className="h-[320px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={wonByCategory} margin={{ top: 10, right: 10, left: 0, bottom: 40 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="category" angle={-15} textAnchor="end" interval={0} height={50} />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="won" name="Won (MW)" />
+                  <Bar dataKey="bid" name="Bid (MW)" />
+                </BarChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle className="text-base">Stage distribution</CardTitle>
+              <CardDescription>Where the pipeline sits: e-RA → LOA → PPA → COD.</CardDescription>
+            </CardHeader>
+            <CardContent className="h-[320px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Tooltip />
+                  <Legend />
+                  <Pie
+                    data={statusPie}
+                    dataKey="count"
+                    nameKey="stage"
+                    outerRadius={110}
+                    label
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Competitor focus */}
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div>
+                <CardTitle className="text-base">Competitor focus</CardTitle>
+                <CardDescription>
+                  Pick a competitor to see their participation, wins and typical tariff behavior in the current filtered universe.
+                </CardDescription>
+              </div>
+              <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                <Button
+                  variant={focusMode === "Group" ? "default" : "outline"}
+                  className="rounded-xl"
+                  onClick={() => setFocusMode("Group")}
+                >
+                  Group
+                </Button>
+                <Button
+                  variant={focusMode === "Company" ? "default" : "outline"}
+                  className="rounded-xl"
+                  onClick={() => setFocusMode("Company")}
+                >
+                  Company
+                </Button>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="rounded-xl justify-between md:w-80">
+                      <span className="truncate">
+                        {focusCompany || "Select competitor"}
+                      </span>
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[360px] rounded-2xl" align="end">
+                    <div className="space-y-3">
+                      <div className="text-sm font-medium">Select {focusMode}</div>
+                      <Input
+                        className="rounded-xl"
+                        placeholder="Search…"
+                        onChange={(e) => {
+                          // This is a lightweight search-by-filter (no extra state)
+                          const val = e.target.value.toLowerCase();
+                          const list = (focusMode === "Group" ? filterOptions.groupCompany : filterOptions.company).filter((x) =>
+                            x.toLowerCase().includes(val)
+                          );
+                          if (list.length === 1) setFocusCompany(list[0]);
+                        }}
+                      />
+                      <div className="max-h-72 overflow-auto pr-1">
+                        {(focusMode === "Group" ? filterOptions.groupCompany : filterOptions.company)
+                          .slice(0, 300)
+                          .map((opt) => (
+                            <Button
+                              key={opt}
+                              variant={opt === focusCompany ? "default" : "ghost"}
+                              className="w-full justify-start rounded-xl"
+                              onClick={() => setFocusCompany(opt)}
+                            >
+                              {opt}
+                            </Button>
+                          ))}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        If your list is long, type a unique substring and press enter.
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-4">
+              <KpiCard title="Rows" value={focusKpis.participation.toLocaleString()} />
+              <KpiCard title="Bid capacity" value={focusKpis.bid.toLocaleString() + " MW"} />
+              <KpiCard title="Won capacity" value={focusKpis.won.toLocaleString() + " MW"} />
+              <KpiCard
+                title="Success rate"
+                value={fmtNum(focusKpis.winRate, 1) + "%"}
+                sub={`Won-weighted avg tariff: ${fmtNum(focusKpis.wAvg, 3)}`}
+              />
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <Card className="rounded-2xl">
+                <CardHeader>
+                  <CardTitle className="text-sm">Top tenders (within current filters)</CardTitle>
+                  <CardDescription>Ranked by won capacity (fallback bid).</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {focusKpis.topTenders.length ? (
+                    focusKpis.topTenders.map((t) => (
+                      <div
+                        key={t.rfsNo}
+                        className="rounded-xl border p-3"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="font-medium leading-tight">{t.rfsNo}</div>
+                          <Badge variant="secondary" className="rounded-lg">
+                            {t.stage}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t.authority}
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <Pill label="Won" value={fmtMW(t.won)} />
+                          <Pill label="Bid" value={fmtMW(t.bid)} />
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-muted-foreground">
+                      No rows for this competitor under current filters.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="rounded-2xl">
+                <CardHeader>
+                  <CardTitle className="text-sm">Focus rows</CardTitle>
+                  <CardDescription>Quick look at the selected competitor’s line items.</CardDescription>
+                </CardHeader>
+                <CardContent className="max-h-[340px] overflow-auto">
+                  <div className="space-y-2">
+                    {focusRows.slice(0, 25).map((r) => (
+                      <div key={r.id} className="rounded-xl border p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-sm font-medium">{r.authorityName}</div>
+                          <Badge variant="secondary" className="rounded-lg">
+                            {r.stage}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {r.rfsNo}
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <Pill label="Won" value={fmtMW(r.wonCapacityMW)} />
+                          <Pill label="Tariff" value={fmtNum(r.finalTariff, 3)} />
+                        </div>
+                      </div>
+                    ))}
+                    {focusRows.length > 25 ? (
+                      <div className="text-xs text-muted-foreground">
+                        Showing first 25 of {focusRows.length} rows.
+                      </div>
+                    ) : null}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Table */}
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+              <div>
+                <CardTitle className="text-base">Detail table</CardTitle>
+                <CardDescription>
+                  Sortable, searchable view of the filtered universe.
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="text-xs text-muted-foreground">Rows per page</div>
+                <Input
+                  className="w-20 rounded-xl"
+                  type="number"
+                  min={5}
+                  max={100}
+                  value={pageSize}
+                  onChange={(e) => setPageSize(clamp(Number(e.target.value || 15), 5, 100))}
+                />
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-auto rounded-2xl border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <SortableTh label="eRA date" k="eRaDate" />
+                    <SortableTh label="Authority" k="authorityName" />
+                    <SortableTh label="Category" k="category" />
+                    <SortableTh label="Type" k="type" />
+                    <SortableTh label="Stage" k="stage" />
+                    <SortableTh label="Group" k="company" />
+                    <SortableTh label="Bid (MW)" k="bidCapacityMW" />
+                    <SortableTh label="Won (MW)" k="wonCapacityMW" />
+                    <SortableTh label="Final tariff" k="finalTariff" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedPaged.rows.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className="whitespace-nowrap">{fmtDate(r.eRaDate)}</TableCell>
+                      <TableCell className="min-w-[140px]">
+                        <div className="font-medium">{r.authorityName}</div>
+                        <div className="text-xs text-muted-foreground">{r.connectivity}</div>
+                      </TableCell>
+                      <TableCell className="min-w-[140px]">{r.category}</TableCell>
+                      <TableCell className="min-w-[140px]">{r.type}</TableCell>
+                      <TableCell>
+                        <Badge className="rounded-lg" variant="secondary">
+                          {r.stage}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="min-w-[220px]">
+                        <div className="font-medium">{r.groupCompany}</div>
+                        <div className="text-xs text-muted-foreground">{r.company}</div>
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">{fmtNum(r.bidCapacityMW, 2)}</TableCell>
+                      <TableCell className="whitespace-nowrap">{fmtNum(r.wonCapacityMW, 2)}</TableCell>
+                      <TableCell className="whitespace-nowrap">{fmtNum(r.finalTariff, 3)}</TableCell>
+                    </TableRow>
+                  ))}
+                  {sortedPaged.rows.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
+                        No rows match your filters.
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </div>
+
+            <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="text-xs text-muted-foreground">
+                Page {sortedPaged.page} of {sortedPaged.pages} · {sortedPaged.total.toLocaleString()} rows
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  className="rounded-xl"
+                  onClick={() => setPage(1)}
+                  disabled={sortedPaged.page === 1}
+                >
+                  First
+                </Button>
+                <Button
+                  variant="outline"
+                  className="rounded-xl"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={sortedPaged.page === 1}
+                >
+                  Prev
+                </Button>
+                <Button
+                  variant="outline"
+                  className="rounded-xl"
+                  onClick={() => setPage((p) => Math.min(sortedPaged.pages, p + 1))}
+                  disabled={sortedPaged.page === sortedPaged.pages}
+                >
+                  Next
+                </Button>
+                <Button
+                  variant="outline"
+                  className="rounded-xl"
+                  onClick={() => setPage(sortedPaged.pages)}
+                  disabled={sortedPaged.page === sortedPaged.pages}
+                >
+                  Last
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="pb-6 text-xs text-muted-foreground">
+          Notes: (1) Weighted average tariff uses won capacity as weights. (2) Tendered capacity is approximated as sum of the first tender-capacity found per RFS No. (3) For your sheet’s duplicate “Bidding Authority” columns, the dashboard assumes name then level.
+        </div>
+      </div>
+    </div>
+  );
+}
