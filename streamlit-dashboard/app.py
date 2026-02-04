@@ -1,32 +1,30 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
+from utils import load_data, preprocess, build_features, do_clustering
 
-# Page config
-st.set_page_config(page_title="My Dashboards", layout="wide")
+st.set_page_config(page_title="Utility Competitor Dashboard", layout="wide")
 
-st.title("📊 My Python Dashboards")
+df = load_data()
+st.sidebar.title("Filters")
+cat_filter = st.sidebar.multiselect("Category", sorted(df["Category"].dropna().unique().tolist()))
+auth_filter = st.sidebar.multiselect("Authority", sorted(df["Bidding Authority"].dropna().unique().tolist()))
 
-import os
+# apply filters
+d = df.copy()
+if cat_filter:
+    d = d[d["Category"].isin(cat_filter)]
+if auth_filter:
+    d = d[d["Bidding Authority"].isin(auth_filter)]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = os.path.join(BASE_DIR, "data.csv")
+st.title("Utility Competitor Analytics")
+st.write("Filtered dataset summary:")
+st.dataframe(d.head())
 
-df = pd.read_csv(DATA_PATH)
+# build features + clustering
+d_clean = preprocess(d)
+features = build_features(d_clean)
 
-# Sidebar dashboard selector
-dashboard = st.sidebar.selectbox(
-    "Select Dashboard",
-    ["Overview", "Trend Analysis"]
-)
+n_clusters = st.sidebar.slider("Clusters", 2, 6, 3)
+features = do_clustering(features, n_clusters)
 
-if dashboard == "Overview":
-    st.header("Overview")
-    st.metric("Total Records", len(df))
-    st.metric("Average Value", round(df["value"].mean(), 2))
-
-elif dashboard == "Trend Analysis":
-    st.header("Trend Analysis")
-    fig = px.line(df, x="date", y="value", title="Value Over Time")
-    st.plotly_chart(fig, use_container_width=True)
-
+st.subheader("Clustered Competitor Features")
+st.dataframe(features)
