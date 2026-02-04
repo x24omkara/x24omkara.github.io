@@ -5,6 +5,9 @@ import streamlit as st
 
 st.write("Files in root:", os.listdir("."))
 st.write("Files in data/:", os.listdir("data"))
+import streamlit as st
+
+from utils import load_data, preprocess, build_features, do_clustering
 
 st.set_page_config(page_title="Utility Competitor Dashboard", layout="wide")
 
@@ -30,7 +33,3 @@ features = build_features(d_clean)
 
 n_clusters = st.sidebar.slider("Clusters", 2, 6, 3)
 features = do_clustering(features, n_clusters)
-
-st.subheader("Clustered Competitor Features")
-st.dataframe(features)
-
