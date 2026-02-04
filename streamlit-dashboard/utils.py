@@ -4,7 +4,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-def load_data(path="data/Competitor_Utility.csv"):
+def load_data(path="data/Competitor_Utiltiy.csv"):
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip()
     return df
@@ -34,3 +34,4 @@ def do_clustering(features, n_clusters=3):
     km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     features["cluster"] = km.fit_predict(Xs)
     return features
+
