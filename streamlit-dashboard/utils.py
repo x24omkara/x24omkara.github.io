@@ -1,6 +1,6 @@
+import os
 import pandas as pd
 import numpy as np
-import os
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
@@ -10,12 +10,9 @@ from sklearn.metrics import silhouette_score
 # -----------------------------
 # 1. Load data (Cloud-safe)
 # -----------------------------
-import os
-import pandas as pd
-
-def load_data():
+def load_data(filename="Competitor_Utiltiy.csv"):
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    CSV_PATH = os.path.join(BASE_DIR, "data.csv")
+    CSV_PATH = os.path.join(BASE_DIR, "data", filename)
 
     if not os.path.exists(CSV_PATH):
         raise FileNotFoundError(f"CSV not found at: {CSV_PATH}")
@@ -47,16 +44,22 @@ def build_features(d: pd.DataFrame) -> pd.DataFrame:
     features = g.agg(
         won_mw=("Won Capacity", "sum"),
         n_tenders=("Won Capacity", "count"),
-        wavg_final_tariff=("Final Tariff",
-                           lambda x: np.average(x.dropna(),
-                                                 weights=d.loc[x.index, "Won Capacity"]
-                                                 .loc[x.notna()]
-                                                 .clip(lower=1))),
+        wavg_final_tariff=(
+            "Final Tariff",
+            lambda x: np.average(
+                x.dropna(),
+                weights=d.loc[x.index, "Won Capacity"]
+                .loc[x.notna()]
+                .clip(lower=1),
+            ),
+        ),
         n_categories=("Category", "nunique"),
     ).reset_index()
 
-    # win-rate proxy (relative scale participation)
-    features["win_rate_tenders"] = features["n_tenders"] / features["n_tenders"].max()
+    # Win-rate proxy (relative scale)
+    features["win_rate_tenders"] = (
+        features["n_tenders"] / features["n_tenders"].max()
+    )
 
     return features
 
@@ -73,10 +76,11 @@ def do_clustering(features: pd.DataFrame, k_min=2, k_max=6):
     ]
     use_cols = [c for c in use_cols if c in features.columns]
 
-    X = (features
-         .set_index("Group Company")[use_cols]
-         .replace([np.inf, -np.inf], np.nan)
-         .dropna())
+    X = (
+        features.set_index("Group Company")[use_cols]
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
 
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
@@ -87,19 +91,20 @@ def do_clustering(features: pd.DataFrame, k_min=2, k_max=6):
         km = KMeans(n_clusters=k, random_state=42, n_init=20)
         labels = km.fit_predict(Xs)
         score = silhouette_score(Xs, labels)
+
         if score > best["score"]:
             best = {"k": k, "score": score, "model": km}
 
     clusters = pd.Series(
         best["model"].predict(Xs),
         index=X.index,
-        name="cluster"
+        name="cluster",
     )
 
-    features_clust = (features
-                      .set_index("Group Company")
-                      .join(clusters, how="inner")
-                      .reset_index())
+    features_clust = (
+        features.set_index("Group Company")
+        .join(clusters, how="inner")
+        .reset_index()
+    )
 
     return features_clust, best
-
