@@ -10,18 +10,17 @@ from sklearn.metrics import silhouette_score
 # -----------------------------
 # 1. Load data (Cloud-safe)
 # -----------------------------
+import os
+import pandas as pd
+
 def load_data():
-    path = os.path.join("data", "Competitor_Utiltiy.csv")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    CSV_PATH = os.path.join(BASE_DIR, "data.csv")
 
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"CSV not found at: {path}")
+    if not os.path.exists(CSV_PATH):
+        raise FileNotFoundError(f"CSV not found at: {CSV_PATH}")
 
-    df = pd.read_csv(path)
-
-    # standardize columns
-    df.columns = df.columns.astype(str).str.strip()
-
-    return df
+    return pd.read_csv(CSV_PATH)
 
 
 # -----------------------------
@@ -103,3 +102,4 @@ def do_clustering(features: pd.DataFrame, k_min=2, k_max=6):
                       .reset_index())
 
     return features_clust, best
+
