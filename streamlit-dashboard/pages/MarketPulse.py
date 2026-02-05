@@ -1,6 +1,8 @@
+import pandas as pd
+import numpy as np
 import streamlit as st
-import plotly.express as px
-from utils import load_data, preprocess
+
+from utils import load_data, preprocess, build_features, do_clustering
 
 st.title("Market Pulse")
 
@@ -13,3 +15,4 @@ agg["month"] = agg["RFS Date"].dt.to_timestamp()
 
 fig = px.line(agg, x="month", y="Won Capacity", title="Won MW over time")
 st.plotly_chart(fig, use_container_width=True)
+
